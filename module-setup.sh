@@ -17,24 +17,28 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 
-ROOTCONF="/etc/dropbear-initramfs"
+HOSTCONF="/etc/dropbear-initramfs"
 INITRDCONF="/etc/dropbear"
+ETCKEYS="/etc/ssh/authorized_keys"
 ROOTKEYS="/root/.ssh/authorized_keys"
-AUTHKEYS="$ROOTCONF/authorized_keys"
+AUTHKEYS="$HOSTCONF/authorized_keys"
 
 gethostkeys () {
-	find "$ROOTCONF" -name 'dropbear_*_host_key' 2>/dev/null
+	find "$HOSTCONF" -name 'dropbear_*_host_key' 2>/dev/null
 }
 
 check () {
 	if ! require_binaries systemd-tty-ask-password-agent; then
 		echo "This module only works with systemd's encrypt hook in initramfs."
 		return 1
-	elif ! require_binaries dropbear || ! [ -z "$(gethostkeys)" ] && ! require_binaries ssh-keygen dropbearconvert; then
-		echo "Please install dropbear and generate host keys first."
+	elif ! require_binaries dropbear; then
+		echo "Please install dropbear first."
 		return 1
-	elif ! [ -f "$AUTHKEYS" ] && ! [ -s "$ROOTKEYS" ]; then
-		echo "Please set up authorized SSH keys in $AUTHKEYS first."
+	elif [[ -z "$(gethostkeys)" ]] && ! require_binaries dropbearkey; then
+		echo "Please generate a server key in $HOSTCONF first, or install dropbearkey first."
+		return 1
+	elif ! [ -s "$AUTHKEYS" ] && ! [ -s "$ETCKEYS" ] && ! [ -s "$ROOTKEYS" ]; then
+		echo "Please setup authorized SSH keys in $ETCKEYS, $ROOTKEYS or $AUTHKEYS first."
 		return 1
 	fi
 	return 255
@@ -47,28 +51,27 @@ depends () {
 
 install () {
 	if [ -z "$(gethostkeys)" ]; then
-		echo "You haven't generated SSH host keys in $ROOTCONF, generating a 4096-bit RSA one..."
-		echo "WARNING: This key will be stored in cleartext in your initramfs."
+		echo "You haven't generated SSH host keys in $HOSTCONF, generating a 4096-bit RSA one..."
+		echo "WARNING: This key will be stored unencrypted in your initramfs."
 		echo "         Do *not* reuse it anywhere else"
-		mkdir -p "$ROOTCONF/"
-		ssh-keygen -t rsa -b 4096 -N '' -f /tmp/dropbear_openssh >/dev/null
-		dropbearconvert openssh dropbear /tmp/dropbear_openssh "$ROOTCONF/dropbear_rsa_host_key"
-		shred -f /tmp/dropbear_openssh 2>/dev/null
-		rm -f /tmp/dropbear_openssh
+		mkdir -p "$HOSTCONF/"
+		dropbearkey -t rsa -s 4096 -f "$HOSTCONF/dropbear_rsa_host_key"
 	fi
-	if ! [ -e "$AUTHKEYS" ]; then
+	if ! [ -s "$AUTHKEYS" ] && [ -s "$ETCKEYS" ]; then
+		echo "You haven't configured authorized SSH keys in $AUTHKEYS, using $ETCKEYS ones"
+		cp "$ETCKEYS" "$AUTHKEYS"
+	elif ! [ -s "$AUTHKEYS" ] && [ -s "$ROOTKEYS" ]; then
 		echo "You haven't configured authorized SSH keys in $AUTHKEYS, using root's ones"
 		cp "$ROOTKEYS" "$AUTHKEYS"
-		sed -ire 's#^ssh#command="/usr/bin/systemd-tty-ask-password-agent --watch" ssh#' "$AUTHKEYS"
 	fi
 	mkdir -p "${initdir}/var/log/"
 	touch "${initdir}/var/log/lastlog"
 	inst_binary dropbear
-	inst_binary chroot
 	for hostkey in $(gethostkeys); do
 		inst "$hostkey" "$INITRDCONF/$(basename "$hostkey")"
 	done
-	inst "$AUTHKEYS" "/root/.ssh/authorized_keys"
+	sed -r -i -e 's#^ssh#no-port-forwarding,no-agent-forwarding,no-X11-forwarding,command="/usr/bin/systemd-tty-ask-password-agent --watch" ssh#' "$AUTHKEYS"
+	inst "$AUTHKEYS" "$ROOTKEYS"
 	inst_hook initqueue 20 "$moddir/start.sh"
 	inst_hook cleanup 05 "$moddir/stop.sh"
 }
